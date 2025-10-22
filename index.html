@@ -13,12 +13,12 @@
   .mono{ font-variant-numeric: tabular-nums; }
   .row{ display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
   label{ display:block; color:#888; font-size:12px; margin-bottom:6px; }
-  /* NOTE: type="text" so iOS allows minus sign; inputmode shows decimal keypad */
   input{ width:140px; padding:8px 10px; border-radius:8px; border:1px solid #333; background:#111; color:#f33; font-weight:600; }
   button{ padding:10px 14px; border:0; border-radius:10px; background:#f33; color:#000; font-weight:800; cursor:pointer; }
   button.secondary{ background:#222; color:#ddd; border:1px solid #333; }
   .help{ color:#888; font-size:12px; margin-top:8px; }
   hr{ border:0; border-top:1px solid #222; margin:14px 0; }
+  .debug{ color:#666; font:12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; margin-top:8px;}
 </style>
 </head>
 <body>
@@ -49,33 +49,17 @@
   <div class="help" id="status">
     Center a known object, paste its Alt/Az here (decimals; negatives OK), tap <b>Align</b>. Then move the scope and watch the numbers.
   </div>
+  <div class="debug" id="dbg">α — β — γ —</div>
 </div>
 
 <script>
-/* ---------------------------------------------------------
-   WHY THIS VERSION FIXES YOUR ISSUES
-   - Inputs accept "-" (type=text + custom parsing).
-   - Orientation uses quaternion math w/ screen-orientation
-     compensation (no ±45° weirdness).
-   --------------------------------------------------------- */
-
-// --- alignment state ---
+// ----------------- state -----------------
 let aligned = false;
-let vDeviceAxis = [1,0,0]; // learned device-fixed optical axis
+let vDeviceAxis = [1,0,0];     // learned device-fixed optical axis
 let emaAlt = null, emaAz = null, kSmooth = 0.18;
 
-// current deviceorientation angles (deg)
-let euler = { alpha:0, beta:0, gamma:0 };
-// current screen orientation (rad)
-let screenOrientRad = getScreenOrientRad();
-window.addEventListener('orientationchange', () => {
-  screenOrientRad = getScreenOrientRad();
-});
-if (screen.orientation && 'onchange' in screen.orientation) {
-  screen.orientation.addEventListener('change', () => {
-    screenOrientRad = getScreenOrientRad();
-  });
-}
+let euler = { alpha:0, beta:0, gamma:0 };   // deviceorientation (deg)
+let screenOrientRad = getScreenOrientRad(); // screen rotation (rad)
 
 function getScreenOrientRad(){
   const ang = (screen.orientation && screen.orientation.angle != null)
@@ -83,20 +67,24 @@ function getScreenOrientRad(){
     : (window.orientation || 0);
   return (ang || 0) * Math.PI/180;
 }
+window.addEventListener('orientationchange', () => { screenOrientRad = getScreenOrientRad(); });
+if (screen.orientation && 'onchange' in screen.orientation) {
+  screen.orientation.addEventListener('change', () => { screenOrientRad = getScreenOrientRad(); });
+}
 
-// --- permissions + listeners (iOS/Safari robust) ---
+// ----------------- permissions + listeners -----------------
 const statusEl = document.getElementById('status');
+const dbgEl    = document.getElementById('dbg');
 let listenersActive = false;
+let lastUpdateTime = 0;
 
 document.getElementById('enableBtn').addEventListener('click', enableSensors);
 
 async function enableSensors() {
   try {
-    if (!window.isSecureContext) {
-      throw new Error('Site must be https (GitHub Pages is https).');
-    }
+    if (!window.isSecureContext) throw new Error('Site must be https (GitHub Pages is https).');
 
-    // iOS 13+ style permission prompts (some versions require BOTH)
+    // iOS 13+ permission prompts (call both if present)
     if (typeof DeviceMotionEvent !== 'undefined' &&
         typeof DeviceMotionEvent.requestPermission === 'function') {
       const r1 = await DeviceMotionEvent.requestPermission();
@@ -108,59 +96,41 @@ async function enableSensors() {
       if (r2 !== 'granted') throw new Error('Orientation permission denied.');
     }
 
-    attachOrientationListeners();     // ← only now, inside the gesture
+    attachOrientationListeners(); // attach inside the gesture
     statusEl.textContent = 'Sensors enabled. Move the scope to see numbers.';
 
-    // sanity timer: if nothing arrives in 2s, suggest Safari setting
     setTimeout(() => {
       if (!listenersActive) return;
       if (lastUpdateTime === 0) {
-        statusEl.textContent =
-          'Still not receiving sensor data. In Settings → Safari, turn ON “Motion & Orientation Access”, then reload and tap Enable.';
+        statusEl.textContent = 'Still not receiving sensor data. In Settings → Safari, turn ON “Motion & Orientation Access”, then reload and tap Enable.';
       }
     }, 2000);
-
   } catch (e) {
     statusEl.textContent = 'Could not enable sensors: ' + e.message;
   }
 }
 
-let lastUpdateTime = 0;
-
 function attachOrientationListeners() {
   if (listenersActive) return;
   listenersActive = true;
 
-  // Some iOS versions fire only one of these:
   window.addEventListener('deviceorientation', handleOrientation, true);
   window.addEventListener('deviceorientationabsolute', handleOrientation, true);
 
-  // Wake things back up after tab switches
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && listenersActive) {
-      lastUpdateTime = 0;
-    }
+    if (!document.hidden && listenersActive) lastUpdateTime = 0;
   });
 }
 
 function handleOrientation(ev) {
-  // Ignore null payloads
   if (ev.alpha == null || ev.beta == null || ev.gamma == null) return;
-
-  euler.alpha = ev.alpha;
-  euler.beta  = ev.beta;
-  euler.gamma = ev.gamma;
+  euler.alpha = ev.alpha; euler.beta = ev.beta; euler.gamma = ev.gamma;
   lastUpdateTime = performance.now();
+  dbgEl.textContent = `α ${euler.alpha.toFixed(1)}  β ${euler.beta.toFixed(1)}  γ ${euler.gamma.toFixed(1)}`;
   updateReadout();
 }
 
-    status.textContent = 'Sensors enabled.';
-  } catch (e) {
-    status.textContent = 'Could not enable sensors: ' + e.message;
-  }
-});
-
-// align / realign
+// ----------------- UI actions -----------------
 document.getElementById('alignBtn').addEventListener('click', () => {
   const alt = parseAngle(document.getElementById('alt').value);
   const az  = parseAngle(document.getElementById('az').value);
@@ -168,70 +138,46 @@ document.getElementById('alignBtn').addEventListener('click', () => {
 
   const tWorld = altAzToUnit(alt, az); // ENU
   const qWD = getQuaternionWorldFromDevice(euler.alpha, euler.beta, euler.gamma, screenOrientRad);
-  const vDev = qInvAct(qWD, tWorld); // v_device = q^{-1} ⊗ t_world ⊗ q
+  const vDev = qInvAct(qWD, tWorld);   // v_device = q^{-1} ⊗ t_world ⊗ q
   vDeviceAxis = norm3(vDev);
   aligned = true;
   emaAlt = null; emaAz = null;
-  document.getElementById('status').textContent = 'Aligned. Move the scope.';
+  statusEl.textContent = 'Aligned. Move the scope.';
 });
 
 document.getElementById('reAlignBtn').addEventListener('click', () => {
   aligned = false;
-  document.getElementById('status').textContent = 'Re-alignment pending. Center a known object and press Align.';
+  statusEl.textContent = 'Re-alignment pending. Center a known object and press Align.';
 });
 
-// start listeners (works immediately on many Android/desktop)
-startListeners();
-
-function startListeners(){
-  window.addEventListener('deviceorientation', (ev) => {
-    if (ev.alpha == null || ev.beta == null || ev.gamma == null) return;
-    euler.alpha = ev.alpha;
-    euler.beta  = ev.beta;
-    euler.gamma = ev.gamma;
-    updateReadout();
-  }, true);
-}
-
-// ----- math utils -----
-
+// ----------------- math utils -----------------
 function deg2rad(d){ return d * Math.PI / 180; }
 function rad2deg(r){ return r * 180 / Math.PI; }
 function clamp(x,a,b){ return Math.min(Math.max(x,a),b); }
+function norm3(v){ const m = Math.hypot(v[0],v[1],v[2]) || 1; return [v[0]/m, v[1]/m, v[2]/m]; }
 
-function norm3(v){
-  const m = Math.hypot(v[0],v[1],v[2]) || 1;
-  return [v[0]/m, v[1]/m, v[2]/m];
-}
-function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
-
-// Parse numbers like "-5.2", "34°12'18\"", "34 12 18"
+// Parse "-5.2" or "34°12'18\"" or "34 12 18"
 function parseAngle(s){
   if (!s) return NaN;
   s = s.trim();
-  // DMS?
   const dms = s.match(/^(-?\d+)(?:[°\s]+(\d+))?(?:['\s]+(\d+(?:\.\d+)?))?["]?\s*$/);
   if (dms){
-    const d = parseFloat(dms[1]);
-    const m = dms[2] ? parseFloat(dms[2]) : 0;
-    const sec = dms[3] ? parseFloat(dms[3]) : 0;
+    const d = parseFloat(dms[1]), m = dms[2] ? parseFloat(dms[2]) : 0, sec = dms[3] ? parseFloat(dms[3]) : 0;
     const sign = d < 0 ? -1 : 1;
     return d + sign*(m/60) + sign*(sec/3600);
   }
-  // plain number
   return parseFloat(s);
 }
 
 // Alt/Az (deg) -> ENU unit vector
 function altAzToUnit(altDeg, azDeg){
   const alt = deg2rad(altDeg), az = deg2rad(azDeg);
-  const x = Math.cos(alt) * Math.sin(az); // East
-  const y = Math.cos(alt) * Math.cos(az); // North
-  const z = Math.sin(alt);                // Up
-  return norm3([x,y,z]);
+  return norm3([ Math.cos(alt)*Math.sin(az),  // East
+                 Math.cos(alt)*Math.cos(az),  // North
+                 Math.sin(alt) ]);            // Up
 }
 
-// Quaternion helpers (as [x,y,z,w])
+// --------- quaternions (as [x,y,z,w]) ----------
 function qMul(a,b){
   return [
     a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
@@ -240,5 +186,57 @@ function qMul(a,b){
     a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2]
   ];
 }
-functi
+function qFromAxisAngle(axis, angle){
+  const s = Math.sin(angle/2);
+  return [axis[0]*s, axis[1]*s, axis[2]*s, Math.cos(angle/2)];
+}
+function qConj(q){ return [-q[0],-q[1],-q[2], q[3]]; }
+function qAct(q, v){ const t=qMul(q,[v[0],v[1],v[2],0]); const r=qMul(t,qConj(q)); return [r[0],r[1],r[2]]; }
+function qInvAct(q, v){ const qc=qConj(q); const t=qMul(qc,[v[0],v[1],v[2],0]); const r=qMul(t,q); return [r[0],r[1],r[2]]; }
+
+// Build device->world quaternion using (alpha,beta,gamma) + screen orientation.
+// Matches the approach in well-tested DeviceOrientationControls.
+function getQuaternionWorldFromDevice(alphaDeg, betaDeg, gammaDeg, orientRad){
+  const alpha = deg2rad(alphaDeg), beta = deg2rad(betaDeg), gamma = deg2rad(gammaDeg);
+
+  const cb = Math.cos(beta/2), sb = Math.sin(beta/2);
+  const ca = Math.cos(alpha/2), sa = Math.sin(alpha/2);
+  const cgm= Math.cos(-gamma/2), sgm = Math.sin(-gamma/2);
+
+  const qY = [0*sb, sb, 0, cb];  // Y(beta)
+  const qX = [sa, 0, 0, ca];     // X(alpha)
+  const qZ = [0, 0, sgm, cgm];   // Z(-gamma)
+  let q = qMul(qMul(qY, qX), qZ);
+
+  // rotate -90° about X: map device coords to world (gravity up)
+  q = qMul(q, qFromAxisAngle([1,0,0], -Math.PI/2));
+
+  // compensate screen rotation
+  q = qMul(q, qFromAxisAngle([0,0,1], -orientRad));
+  return q;
+}
+
+// ----------------- readout -----------------
+function updateReadout(){
+  const axis = aligned ? vDeviceAxis : [1,0,0];
+  const qWD  = getQuaternionWorldFromDevice(euler.alpha, euler.beta, euler.gamma, screenOrientRad);
+  const vWorld = qAct(qWD, axis); // ENU: x=E, y=N, z=U
+
+  const alt = Math.asin(clamp(vWorld[2], -1, 1));   // -90..+90
+  let az    = Math.atan2(vWorld[0], vWorld[1]);     // 0=N, +E
+  let altD = rad2deg(alt), azD = rad2deg(az); if (azD < 0) azD += 360;
+
+  if (emaAlt == null){ emaAlt = altD; emaAz = azD; }
+  else {
+    emaAlt = emaAlt + kSmooth*(altD - emaAlt);
+    let d = azD - emaAz; if (d > 180) d -= 360; if (d < -180) d += 360;
+    emaAz = emaAz + kSmooth*d; if (emaAz < 0) emaAz += 360; if (emaAz >= 360) emaAz -= 360;
+  }
+
+  document.getElementById('readout').innerHTML =
+    `Alt ${emaAlt.toFixed(2)}°<br/>Az  ${emaAz.toFixed(2)}°`;
+}
+</script>
+</body>
+</html>
 
