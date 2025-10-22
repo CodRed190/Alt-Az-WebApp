@@ -84,19 +84,76 @@ function getScreenOrientRad(){
   return (ang || 0) * Math.PI/180;
 }
 
-// --- permissions (iOS) ---
-document.getElementById('enableBtn').addEventListener('click', async () => {
-  const status = document.getElementById('status');
+// --- permissions + listeners (iOS/Safari robust) ---
+const statusEl = document.getElementById('status');
+let listenersActive = false;
+
+document.getElementById('enableBtn').addEventListener('click', enableSensors);
+
+async function enableSensors() {
   try {
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+    if (!window.isSecureContext) {
+      throw new Error('Site must be https (GitHub Pages is https).');
+    }
+
+    // iOS 13+ style permission prompts (some versions require BOTH)
+    if (typeof DeviceMotionEvent !== 'undefined' &&
+        typeof DeviceMotionEvent.requestPermission === 'function') {
       const r1 = await DeviceMotionEvent.requestPermission();
-      if (r1 !== 'granted') throw new Error('Motion permission denied');
+      if (r1 !== 'granted') throw new Error('Motion permission denied.');
     }
-    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
       const r2 = await DeviceOrientationEvent.requestPermission();
-      if (r2 !== 'granted') throw new Error('Orientation permission denied');
+      if (r2 !== 'granted') throw new Error('Orientation permission denied.');
     }
-    startListeners();
+
+    attachOrientationListeners();     // ← only now, inside the gesture
+    statusEl.textContent = 'Sensors enabled. Move the scope to see numbers.';
+
+    // sanity timer: if nothing arrives in 2s, suggest Safari setting
+    setTimeout(() => {
+      if (!listenersActive) return;
+      if (lastUpdateTime === 0) {
+        statusEl.textContent =
+          'Still not receiving sensor data. In Settings → Safari, turn ON “Motion & Orientation Access”, then reload and tap Enable.';
+      }
+    }, 2000);
+
+  } catch (e) {
+    statusEl.textContent = 'Could not enable sensors: ' + e.message;
+  }
+}
+
+let lastUpdateTime = 0;
+
+function attachOrientationListeners() {
+  if (listenersActive) return;
+  listenersActive = true;
+
+  // Some iOS versions fire only one of these:
+  window.addEventListener('deviceorientation', handleOrientation, true);
+  window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+
+  // Wake things back up after tab switches
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && listenersActive) {
+      lastUpdateTime = 0;
+    }
+  });
+}
+
+function handleOrientation(ev) {
+  // Ignore null payloads
+  if (ev.alpha == null || ev.beta == null || ev.gamma == null) return;
+
+  euler.alpha = ev.alpha;
+  euler.beta  = ev.beta;
+  euler.gamma = ev.gamma;
+  lastUpdateTime = performance.now();
+  updateReadout();
+}
+
     status.textContent = 'Sensors enabled.';
   } catch (e) {
     status.textContent = 'Could not enable sensors: ' + e.message;
